@@ -9,7 +9,8 @@
 #include "driver/uart.h"
 #include "driver/gpio.h"
 
-extern "C" {
+extern "C"
+{
     void app_main(void);
 }
 
@@ -25,20 +26,24 @@ class Problem
         int ts_end;
 };
 
+static uint32_t get_time(void);
+static void print(char* data);
+static void print(char* data, int length);
 static void knapsack_worker(void *arg);
 static Problem* parse_problem(std::string problem);
 static void init_workers(char* cant);
 static void knapsack_master(void *arg);
 void app_main(void);
 
+
+// constants and global variables
 #define BUF_SIZE (1024)
-
 std::queue<std::string> cola;
+std::queue<std::string> colaOut;
 
-std::queue<std::string> colaSalida;
-
-// SemaphoreHandle_t xSemaphoreInput;
-// SemaphoreHandle_t xSemaphoreOutput;
+SemaphoreHandle_t xSemaphoreInput;
+SemaphoreHandle_t xSemaphoreOutput;
+SemaphoreHandle_t xSemaphorePrint;
 
 uart_config_t uart_config = {
     .baud_rate = 115200,
@@ -50,12 +55,31 @@ uart_config_t uart_config = {
     .use_ref_tick = false
 };
 
+static uint32_t get_time(void)
+{
+    // return clock() / (CLOCKS_PER_SEC / 100);
+    return xTaskGetTickCount() * 10;
+}
+
+static void print(char* data)
+{
+    int length = strlen(data);
+    print(data, length);
+}
+
+static void print(char* data, int length)
+{
+    while (xSemaphoreTake(xSemaphorePrint, ( TickType_t )100) != pdTRUE);
+    uart_write_bytes(UART_NUM_0, (const char *)data, length);
+    xSemaphoreGive(xSemaphorePrint);
+}
+
 static Problem* parse_problem(std::string problem)
 {
     char* token;
     std::string split = ",";
-    char* problem_aux = new char[cola.front().size() + 1];
-    strcpy(problem_aux, cola.front().c_str());
+    char* problem_aux = new char[problem.size() + 1];
+    strcpy(problem_aux, problem.c_str());
     Problem* p = new Problem();
     // extract the problem id, the first character is ignored because its a '#'
     token = strtok(problem_aux, split.c_str());
@@ -92,13 +116,14 @@ static void knapsack_master(void *arg)
 {
     // Configure a temporary buffer for the incoming data
     char *data = (char *) malloc(BUF_SIZE);
+    char *dataOut = (char *) malloc(BUF_SIZE);
     int cont = 0;
     bool first = true;
     while (1) {
         // Read data from the UART
-        uint32_t len = uart_read_bytes(UART_NUM_0, (uint8_t *)(data + cont), BUF_SIZE, 20 / portTICK_RATE_MS);
+        uint32_t len = uart_read_bytes(UART_NUM_0, (uint8_t *)(data + cont), BUF_SIZE, 20 / portTICK_PERIOD_MS);
         // Write data back to the UART
-        uart_write_bytes(UART_NUM_0, (const char *) (data + cont), len);
+        print((data + cont), len);
         if(len > 0) {
             cont += len;
             if(data[cont - 1] == '*') {
@@ -108,11 +133,24 @@ static void knapsack_master(void *arg)
                     first = false;
                 } else {
                     std::string problem(data);
+                    while (xSemaphoreTake(xSemaphoreInput, ( TickType_t )100) != pdTRUE);
                     cola.push(problem);
+                    xSemaphoreGive(xSemaphoreInput);
+                    sprintf(data, "Problem added\n");
+                    print(data);
                 }
                 cont =  0;
             }
-            
+        }
+
+        // check if an output is available and send it through UART
+        if(xSemaphoreTake(xSemaphoreOutput, ( TickType_t )100) == pdTRUE) {
+            if (!colaOut.empty()) {
+                sprintf(dataOut, "\tSalida: %s\n", colaOut.front().c_str());
+                colaOut.pop();
+                print(dataOut);
+            }
+            xSemaphoreGive(xSemaphoreOutput);
         }
     }
 }
@@ -121,32 +159,33 @@ static void knapsack_worker(void *arg)
 {
     char* data = (char *) malloc(sizeof(char)*BUF_SIZE);
     uint32_t tid = (uint32_t)arg;
-    const TickType_t xDelay = 10000 / portTICK_PERIOD_MS;
+    const TickType_t xDelay = 1000 / portTICK_PERIOD_MS;
     std::string problem;
-    uint32_t xTime = clock() / CLOCKS_PER_SEC;
 
     sprintf(data, "Worker Thread id:%d initialized\n", tid);
-    uart_write_bytes(UART_NUM_0, (const char *)data, strlen(data));
+    print(data);
     // Configure a temporary buffer for the incoming data
     while (1) {
-        xTime = clock() / CLOCKS_PER_SEC;
-        // Write data back to the UART
-        sprintf(data, "%d, %s \n", xTime, "Hola ");
-        uart_write_bytes(UART_NUM_0, (const char *)data, strlen(data));
-        if(!cola.empty()) {
-            // problem = new char[cola.front().size() + 1];
-            // strcpy(problem, cola.front().c_str());
-            problem = cola.front();
-            cola.pop();
-            // sprintf(data, "'%s'\n\n", problem);
-            // uart_write_bytes(UART_NUM_0, (const char *)data, strlen(data));
-            Problem* p = parse_problem(problem);
+        sprintf(data, "Worker Thread id:%d loop, time: %d, core# %d \n", tid, get_time(), xPortGetCoreID());
+        print(data);
+        if (xSemaphoreTake(xSemaphoreInput, ( TickType_t )100) == pdTRUE) {
+            if (!cola.empty()) {
+                problem = cola.front();
+                cola.pop();
+                xSemaphoreGive(xSemaphoreInput);
 
-            
-            // uart_write_bytes(UART_NUM_0, (const char *)data, strlen(data));
-            sprintf(data, "%d %d %s\n", p->weights.size(), p->values.size(), ";");
-            uart_write_bytes(UART_NUM_0, (const char *)data, strlen(data));
-            delete p;
+                Problem* p = parse_problem(problem);
+                p->ts_begin = get_time();
+
+                while (xSemaphoreTake(xSemaphoreOutput, ( TickType_t )100) != pdTRUE);
+                colaOut.push(problem);
+                xSemaphoreGive(xSemaphoreOutput);
+                
+                delete p;
+            } else {
+                xSemaphoreGive(xSemaphoreInput);
+
+            }
         }
         vTaskDelay(xDelay);
     }
@@ -157,10 +196,13 @@ void app_main(void)
     /* Configure parameters of an UART driver,
      * communication pins and install the driver */
     uart_param_config(UART_NUM_0, &uart_config);
-
-    // xSemaphoreInput = xSemaphoreCreateMutex();
-    // xSemaphoreOutput = xSemaphoreCreateMutex();
-
     uart_driver_install(UART_NUM_0, BUF_SIZE * 2, 0, 0, NULL, 0);
+
+    // Create Mutex for the queues and the Output
+    xSemaphoreInput = xSemaphoreCreateMutex();
+    xSemaphoreOutput = xSemaphoreCreateMutex();
+    xSemaphorePrint = xSemaphoreCreateMutex();
+
+    // Create the Master Thread
     xTaskCreate(knapsack_master, "knapsack_master", 1024, NULL, 10, NULL);
 }
