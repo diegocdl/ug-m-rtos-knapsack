@@ -4,6 +4,7 @@
 #include <string>
 #include <time.h>
 #include <queue>
+#include <deque>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/uart.h"
@@ -19,11 +20,20 @@ class Problem
     public:
         int id;
         int time;
+        int tid;
         int capacity;
-        std::queue<int> weights; 
-        std::queue<int> values;
+        int number_elements;
+        std::deque<int> weights; 
+        std::deque<int> values;
         int ts_begin;
         int ts_end;
+        int solution;
+
+        void print(char* str)
+        {
+            time = ts_end - ts_begin;
+            sprintf(str, "#%d,%d,%d|%d|%d,%d,%d", tid, id, capacity, solution, ts_begin, ts_end, time);
+        }
 };
 
 static uint32_t get_time(void);
@@ -31,6 +41,8 @@ static void print(char* data);
 static void print(char* data, int length);
 static void knapsack_worker(void *arg);
 static Problem* parse_problem(std::string problem);
+int solve_knapSack(Problem* problem);
+int knapSack(int W, int wt[], int val[], int n);
 static void init_workers(char* cant);
 static void knapsack_master(void *arg);
 void app_main(void);
@@ -58,7 +70,8 @@ uart_config_t uart_config = {
 static uint32_t get_time(void)
 {
     // return clock() / (CLOCKS_PER_SEC / 100);
-    return xTaskGetTickCount() * 10;
+    return xTaskGetTickCount();
+    // return clock();
 }
 
 static void print(char* data)
@@ -81,6 +94,7 @@ static Problem* parse_problem(std::string problem)
     char* problem_aux = new char[problem.size() + 1];
     strcpy(problem_aux, problem.c_str());
     Problem* p = new Problem();
+    p->ts_begin = get_time();
     // extract the problem id, the first character is ignored because its a '#'
     token = strtok(problem_aux, split.c_str());
     p->id = atoi(token + 1);
@@ -89,53 +103,100 @@ static Problem* parse_problem(std::string problem)
     token = strtok(NULL, split.c_str());
     p->capacity = atoi(token);
 
-    while (token != NULL) {
+    while (token != NULL)
+    {
         token = strtok(NULL, split.c_str());
         if (token != NULL) {
-            p->weights.push(atoi(token));
+            p->weights.push_back(atoi(token));
             token = strtok(NULL, split.c_str());
             if (token != NULL) {
-                p->values.push(atoi(token));
+                p->values.push_back(atoi(token));
             }
         }
     }
+    p->number_elements = p->values.size();
     delete problem_aux;
     return p;
 }
+
+// A utility function that returns maximum of two integers 
+int max(int a, int b) { return (a > b)? a : b; } 
+  
+// Returns the maximum value that can be put in a knapsack of capacity W 
+int knapSack(int W, std::deque<int>wt, std::deque<int>val, int n) 
+{ 
+   int i, w; 
+    int K[n+1][W+1];
+  
+    // Build table K[][] in bottom up manner 
+    for (i = 0; i <= n; i++) 
+    { 
+        for (w = 0; w <= W; w++) 
+        { 
+            if (i==0 || w==0) 
+                K[i][w] = 0; 
+            else if (wt[i-1] <= w) 
+                    K[i][w] = max(val[i-1] + K[i-1][w-wt[i-1]],  K[i-1][w]); 
+            else
+                    K[i][w] = K[i-1][w]; 
+        } 
+    } 
+    return K[n][W]; 
+}
+
+int solve_knapSack(Problem* p)
+{
+    return knapSack(p->capacity, p->weights, p->values, p->number_elements);
+}
+  
 
 static void init_workers(char* cant_str)
 {
     int cant = atoi(cant_str);
     int i = 0;
-    for(i = 0; i < cant; i++) {
-         xTaskCreate(knapsack_worker, "knapsack_worker", 1024, (void*)i, 10, NULL);
+    for(i = 0; i < cant; i++)
+    {
+         xTaskCreate(knapsack_worker, "knapsack_worker", 8192, (void*)i, 10, NULL);
     }
 }
 
 static void knapsack_master(void *arg)
 {
     // Configure a temporary buffer for the incoming data
-    char *data = (char *) malloc(BUF_SIZE);
-    char *dataOut = (char *) malloc(BUF_SIZE);
+    char* pch;
+    char* data = (char *) malloc(BUF_SIZE);
+    char* dataOut = (char *) malloc(BUF_SIZE);
+    std::string dataOutStr;
     int cont = 0;
     bool first = true;
-    while (1) {
+    while (1)
+    {
         // Read data from the UART
         uint32_t len = uart_read_bytes(UART_NUM_0, (uint8_t *)(data + cont), BUF_SIZE, 20 / portTICK_PERIOD_MS);
         // Write data back to the UART
         print((data + cont), len);
-        if(len > 0) {
+        if(len > 0)
+        {
             cont += len;
-            if(data[cont - 1] == '*') {
-                data[cont - 1] = '\0';
-                if (first) {
+            if(data[cont - 1] == '*')
+            {
+                // data[cont - 1] = '\0';
+                data[cont] = '\0';
+                if (first)
+                {
                     init_workers(&data[1]);
                     first = false;
                 } else {
-                    std::string problem(data);
-                    while (xSemaphoreTake(xSemaphoreInput, ( TickType_t )100) != pdTRUE);
-                    cola.push(problem);
-                    xSemaphoreGive(xSemaphoreInput);
+                    pch = strtok(data, "*");
+                    while (pch != NULL)
+                    {
+                        // std::string problem(data);
+                        std::string problem(pch);
+                        while (xSemaphoreTake(xSemaphoreInput, ( TickType_t )100) != pdTRUE);
+                        cola.push(problem);
+                        xSemaphoreGive(xSemaphoreInput);
+                        pch = strtok (NULL, "*");
+                    }
                     sprintf(data, "Problem added\n");
                     print(data);
                 }
@@ -146,11 +207,15 @@ static void knapsack_master(void *arg)
         // check if an output is available and send it through UART
         if(xSemaphoreTake(xSemaphoreOutput, ( TickType_t )100) == pdTRUE) {
             if (!colaOut.empty()) {
-                sprintf(dataOut, "\tSalida: %s\n", colaOut.front().c_str());
+                dataOutStr = colaOut.front();
                 colaOut.pop();
+                xSemaphoreGive(xSemaphoreOutput);
+
+                sprintf(dataOut, "\tSalida: %s\n", dataOutStr.c_str());
                 print(dataOut);
+            } else {
+                xSemaphoreGive(xSemaphoreOutput);
             }
-            xSemaphoreGive(xSemaphoreOutput);
         }
     }
 }
@@ -159,15 +224,15 @@ static void knapsack_worker(void *arg)
 {
     char* data = (char *) malloc(sizeof(char)*BUF_SIZE);
     uint32_t tid = (uint32_t)arg;
-    const TickType_t xDelay = 1000 / portTICK_PERIOD_MS;
+    const TickType_t xDelay = 100 / portTICK_PERIOD_MS;
     std::string problem;
 
     sprintf(data, "Worker Thread id:%d initialized\n", tid);
     print(data);
     // Configure a temporary buffer for the incoming data
     while (1) {
-        sprintf(data, "Worker Thread id:%d loop, time: %d, core# %d \n", tid, get_time(), xPortGetCoreID());
-        print(data);
+        // sprintf(data, "Worker Thread id:%d loop, time: %d, core# %d \n", tid, get_time(), xPortGetCoreID());
+        // print(data);
         if (xSemaphoreTake(xSemaphoreInput, ( TickType_t )100) == pdTRUE) {
             if (!cola.empty()) {
                 problem = cola.front();
@@ -175,19 +240,23 @@ static void knapsack_worker(void *arg)
                 xSemaphoreGive(xSemaphoreInput);
 
                 Problem* p = parse_problem(problem);
-                p->ts_begin = get_time();
+                p->tid = tid;
 
+                p->solution = solve_knapSack(p);
+                // vTaskDelay(xDelay);
+                p->ts_end = get_time();
+                p->print(data);
+                std::string dataString(data);
                 while (xSemaphoreTake(xSemaphoreOutput, ( TickType_t )100) != pdTRUE);
-                colaOut.push(problem);
+                colaOut.push(dataString);
                 xSemaphoreGive(xSemaphoreOutput);
                 
                 delete p;
             } else {
                 xSemaphoreGive(xSemaphoreInput);
-
+                vTaskDelay(xDelay);
             }
         }
-        vTaskDelay(xDelay);
     }
 }
 
@@ -205,4 +274,5 @@ void app_main(void)
 
     // Create the Master Thread
     xTaskCreate(knapsack_master, "knapsack_master", 1024, NULL, 10, NULL);
+    // vTaskStartScheduler();
 }
